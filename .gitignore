@@ -1,0 +1,8 @@
+test_data/
+best_model.pth
+notes.txt
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+tests/test_K9.bed
+tests/test_TE_ann.txt
