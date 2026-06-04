@@ -4,13 +4,13 @@ import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-from load_df import load_K9, load_TE_ann
+from load_df import load_K9, load_TE_map
 
 TEST_K9  = Path(__file__).parent / "test_K9.bed"
-TEST_ANN = Path(__file__).parent / "test_TE_ann.txt"
+TEST_MAP = Path(__file__).parent / "test_TE_map.txt"
 
 k9     = load_K9(str(TEST_K9))
-te_ann = load_TE_ann(str(TEST_ANN))
+te_map = load_TE_map(str(TEST_MAP))
 
 class TestLoadK9(unittest.TestCase):
 
@@ -60,44 +60,53 @@ class TestLoadK9(unittest.TestCase):
                 self.assertEqual(starts, sorted(starts))
 
 
-class TestLoadTEAnn(unittest.TestCase):
+class TestLoadTEMap(unittest.TestCase):
 
     def test_returns_list(self):
-        self.assertIsInstance(te_ann, list)
+        self.assertIsInstance(te_map, list)
 
-    def test_number_of_tes(self):
-        self.assertEqual(len(te_ann), 4)
+    def test_only_flag1_rows_kept(self):
+        # fixture has 2 flag=1, 1 flag=0, 1 flag=-1
+        self.assertEqual(len(te_map), 2)
 
     def test_keys(self):
-        for rec in te_ann:
+        expected = {"chrom", "src_start", "src_end", "tgt_start", "tgt_end", "name", "family"}
+        for rec in te_map:
             with self.subTest(rec=rec):
-                self.assertIn("chrom",  rec)
-                self.assertIn("start",  rec)
-                self.assertIn("end",    rec)
-                self.assertIn("name",   rec)
-                self.assertIn("family", rec)
+                self.assertEqual(set(rec.keys()), expected)
 
-    def test_no_extra_keys(self):
-        for rec in te_ann:
-            self.assertEqual(set(rec.keys()), {"chrom", "start", "end", "name", "family"})
-
-    def test_position_int(self):
-        for rec in te_ann:
+    def test_position_ints(self):
+        for rec in te_map:
             with self.subTest(rec=rec):
-                self.assertIsInstance(rec["start"], int)
-                self.assertIsInstance(rec["end"],   int)
+                self.assertIsInstance(rec["src_start"], int)
+                self.assertIsInstance(rec["src_end"],   int)
+                self.assertIsInstance(rec["tgt_start"], int)
+                self.assertIsInstance(rec["tgt_end"],   int)
 
     def test_first_record_values(self):
-        rec = te_ann[0]
-        self.assertEqual(rec["chrom"],  "2L")
-        self.assertEqual(rec["start"],  100)
-        self.assertEqual(rec["end"],    200)
-        self.assertEqual(rec["name"],   "roo")
-        self.assertEqual(rec["family"], "LTR/Bel-Pao")
+        rec = te_map[0]
+        self.assertEqual(rec["chrom"],     "2L")
+        self.assertEqual(rec["src_start"], 100)
+        self.assertEqual(rec["src_end"],   200)
+        self.assertEqual(rec["tgt_start"], 5000)
+        self.assertEqual(rec["tgt_end"],   5000)
+        self.assertEqual(rec["name"],      "roo")
+        self.assertEqual(rec["family"],    "LTR/Bel-Pao")
 
-    def test_extra_columns_ignored(self):
-        rec = te_ann[0]
-        self.assertEqual(len(rec), 5)
+    def test_second_record_tgt_range(self):
+        rec = te_map[1]
+        self.assertEqual(rec["tgt_start"], 8000)
+        self.assertEqual(rec["tgt_end"],   8100)
+
+    def test_empty_file(self):
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("# header\n")
+            f.write("2L\t100\t200\troo\tLTR\t100\t0\t-1\t-1\n")
+            fname = f.name
+        result = load_TE_map(fname)
+        os.unlink(fname)
+        self.assertEqual(result, [])
 
 
 if __name__ == "__main__":

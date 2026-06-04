@@ -1,0 +1,4 @@
+2L	100	200	roo	LTR/Bel-Pao	100	1	5000	5000
+2L	500	600	doc	LINE/Jockey	100	1	8000	8100
+2R	300	400	copia	LTR/Copia	100	0	-1	-1
+X	800	900	gypsy	LTR/Gypsy	100	-1	-1	-1
