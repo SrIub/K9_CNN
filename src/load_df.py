@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple, TypedDict
 
-class TERecord(TypedDict):
-    chrom:  str
-    start:  int
-    end:    int
-    name:   str
-    family: str
+class MappedTE(TypedDict):
+    chrom:     str
+    src_start: int
+    src_end:   int
+    tgt_start: int
+    tgt_end:   int
+    name:      str
+    family:    str
 
 K9Dict = Dict[str, Tuple[List[int], List[int], List[int]]]
 
@@ -43,34 +45,40 @@ def load_K9(filepath: str) -> K9Dict:
 
     return chrom_data
 
-def load_TE_ann(filepath: str) -> List[TERecord]:
+def load_TE_map(filepath: str) -> List[MappedTE]:
     """
-    Load a TE annotation file with format:
-        chrom  start  end  name  family  ...
-        2L     489573 491304 roo LTR/Bel-Pao ...
-    Returns a list with one dict per TE. 
+    Load a synteny map file with format:
+        chrom  src_start  src_end  name  family  length  flag  tgt_start  tgt_end
+        2L     489573     491304   roo   LTR/...  1731   1     589113     589113
+    Only rows with flag=1 (syntenic position known) are returned.
+    tgt_start/tgt_end are the corresponding breakpoint coords in the other strain.
     """
-    records: List[TERecord] = []
+    records: List[MappedTE] = []
     with open(filepath) as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
             parts = line.split()
+            if int(parts[6]) != 1:
+                continue
             records.append({
-                "chrom":  parts[0],
-                "start":  int(parts[1]),
-                "end":    int(parts[2]),
-                "name":   parts[3],
-                "family": parts[4],
+                "chrom":     parts[0],
+                "src_start": int(parts[1]),
+                "src_end":   int(parts[2]),
+                "tgt_start": int(parts[7]),
+                "tgt_end":   int(parts[8]),
+                "name":      parts[3],
+                "family":    parts[4],
             })
     return records
+
 
 def extract_K9_window(
     k9: K9Dict,
     chrom: str,
     center: int,
-    window: int = 20_000,
+    window: int = 10_000,
     n_bins: int = 400,
 ) -> Optional[np.ndarray]:
     """
@@ -106,47 +114,85 @@ def extract_K9_window(
             bin_bp_start = query_start + b * bin_size
             bin_bp_end   = bin_bp_start + bin_size
             bp_in_bin    = min(overlap_end, bin_bp_end) - max(overlap_start, bin_bp_start)
-            result[b]   += c * (bp_in_bin / bin_size)   # K9 count normalized by bp (although usually should be 1)
+            result[b]   += c * (bp_in_bin / bin_size)   # K9 count normalized by bp (bins are almost always the same # of bp)
 
     return result
 
 
 def build_te_df(
-    A4_k9:  K9Dict,
-    A7_k9:  K9Dict,
-    A4_ann: List[TERecord],
-    A7_ann: List[TERecord],
-    window: int = 20_000,
-    n_bins: int = 800,
+    A4_k9:    K9Dict,
+    A7_k9:    K9Dict,
+    A4_to_A7: List[MappedTE],
+    A7_to_A4: List[MappedTE],
+    flank:    int = 10000,
+    n_bins:   int = 400,
 ) -> pd.DataFrame:
     """
-    Build a DataFrame with one row per TE locus from either strain.
-    K9 windows are extracted from both strains at every locus.
+    Build a DataFrame with one row per TE locus using synteny-aware window extraction.
+
+    For A4_to_A7 entries (TE in A4, syntenic breakpoint in A7):
+        A4_K9 extracted at A4 coords  → label_A4=1
+        A7_K9 extracted at A7 tgt coords → label_A7=0
+
+    For A7_to_A4 entries (TE in A7, syntenic breakpoint in A4):
+        A7_K9 extracted at A7 coords  → label_A7=1
+        A4_K9 extracted at A4 tgt coords → label_A4=0
+
     Returns DataFrame: chrom, locus_start, locus_end, center, A4_K9, A7_K9, label_A4, label_A7
     """
+    half_flank    = flank  // 2
+    bins_per_side = n_bins // 2
     rows = []
 
-    def process(ann, label_A4, label_A7):
-        for te in ann:
-            chrom  = te["chrom"]
-            center = (te["start"] + te["end"]) // 2
-            A4_sig = extract_K9_window(A4_k9, chrom, center, window, n_bins)
-            A7_sig = extract_K9_window(A7_k9, chrom, center, window, n_bins)
-            if A4_sig is None or A7_sig is None:
-                continue
-            rows.append({
-                "chrom":       chrom,
-                "locus_start": te["start"],
-                "locus_end":   te["end"],
-                "center":      center,
-                "A4_K9":       A4_sig,
-                "A7_K9":       A7_sig,
-                "label_A4":    label_A4,
-                "label_A7":    label_A7,
-            })
+    for te in A4_to_A7:
+        chrom      = te["chrom"]
+        A4_start   = te["src_start"]
+        A4_end     = te["src_end"]
+        A7_center  = (te["tgt_start"] + te["tgt_end"]) // 2
 
-    process(A4_ann, label_A4=1, label_A7=0)
-    process(A7_ann, label_A4=0, label_A7=1)
+        A4_left  = extract_K9_window(A4_k9, chrom, A4_start - half_flank, half_flank, bins_per_side)
+        A4_right = extract_K9_window(A4_k9, chrom, A4_end   + half_flank, half_flank, bins_per_side)
+        A7_left  = extract_K9_window(A7_k9, chrom, A7_center - half_flank, half_flank, bins_per_side)
+        A7_right = extract_K9_window(A7_k9, chrom, A7_center + half_flank, half_flank, bins_per_side)
+
+        if any(sig is None for sig in [A4_left, A4_right, A7_left, A7_right]):
+            continue
+
+        rows.append({
+            "chrom":       chrom,
+            "locus_start": A4_start,
+            "locus_end":   A4_end,
+            "center":      (A4_start + A4_end) // 2,
+            "A4_K9":       np.concatenate([A4_left,  A4_right]),
+            "A7_K9":       np.concatenate([A7_left,  A7_right]),
+            "label_A4":    1,
+            "label_A7":    0,
+        })
+
+    for te in A7_to_A4:
+        chrom      = te["chrom"]
+        A7_start   = te["src_start"]
+        A7_end     = te["src_end"]
+        A4_center  = (te["tgt_start"] + te["tgt_end"]) // 2
+
+        A7_left  = extract_K9_window(A7_k9, chrom, A7_start  - half_flank, half_flank, bins_per_side)
+        A7_right = extract_K9_window(A7_k9, chrom, A7_end    + half_flank, half_flank, bins_per_side)
+        A4_left  = extract_K9_window(A4_k9, chrom, A4_center - half_flank, half_flank, bins_per_side)
+        A4_right = extract_K9_window(A4_k9, chrom, A4_center + half_flank, half_flank, bins_per_side)
+
+        if any(sig is None for sig in [A4_left, A4_right, A7_left, A7_right]):
+            continue
+
+        rows.append({
+            "chrom":       chrom,
+            "locus_start": A7_start,
+            "locus_end":   A7_end,
+            "center":      (A7_start + A7_end) // 2,
+            "A4_K9":       np.concatenate([A4_left,  A4_right]),
+            "A7_K9":       np.concatenate([A7_left,  A7_right]),
+            "label_A4":    0,
+            "label_A7":    1,
+        })
 
     return pd.DataFrame(rows)
 
@@ -155,63 +201,95 @@ def sample_negatives(
     A4_k9:     K9Dict,
     A7_k9:     K9Dict,
     neg_ratio: float = 0.10,
-    window:    int   = 20_000,
-    n_bins:    int   = 800,
+    flank:     int   = 10_000,
+    n_bins:    int   = 400,
     seed:      int   = 42,
 ) -> pd.DataFrame:
     """
-    Sample random genomic positions as negative samples (no TE in either strain).
-    Candidates are midpoints of A4 K9 intervals that don't overlap a TE window.
+    Sample random negative pairs: one A4 position + one independent A7 position,
+    each confirmed absent from their own strain's TE regions.
+
+    A4 exclusion zones are built from label_A4=1 rows in te_df (A4 TE loci).
+    A7 exclusion zones are built from label_A7=1 rows in te_df (A7 TE loci).
+    Candidates are drawn from K9 interval midpoints in each strain independently.
+
+    A4_K9 uses a virtual TE size (sampled from te_df) for realistic locus columns.
+    A7_K9 uses the sampled center as a point, matching the tgt convention in build_te_df.
     Returns DataFrame with same columns as te_df, all labels 0.
     """
-    rng   = np.random.default_rng(seed)
-    n_neg = int(len(te_df) * neg_ratio)
+    rng           = np.random.default_rng(seed)
+    n_neg         = int(len(te_df) * neg_ratio)
+    te_sizes      = (te_df["locus_end"] - te_df["locus_start"]).values
+    half_flank    = flank  // 2
+    bins_per_side = n_bins // 2
 
-    # Build sorted te_windows per chrom
-    te_regions: Dict[str, List[Tuple[int, int]]] = {}
-    for _, row in te_df.iterrows():
-        chrom, c = row["chrom"], row["center"]
-        te_regions.setdefault(chrom, []).append((c - window, c + window))
-    for chrom in te_regions:
-        te_regions[chrom].sort()
+    def build_exclusion(mask) -> Dict[str, List[Tuple[int, int]]]:
+        regions: Dict[str, List[Tuple[int, int]]] = {}
+        for _, row in te_df[mask].iterrows():
+            regions.setdefault(row["chrom"], []).append(
+                (row["locus_start"] - flank, row["locus_end"] + flank)
+            )
+        for chrom in regions:
+            regions[chrom].sort()
+        return regions
 
-    def overlaps_te(chrom: str, center: int) -> bool:
-        if chrom not in te_regions:
+    A4_regions = build_exclusion(te_df["label_A4"] == 1)
+    A7_regions = build_exclusion(te_df["label_A7"] == 1)
+
+    def overlaps(chrom: str, center: int, regions: Dict[str, List[Tuple[int, int]]]) -> bool:
+        if chrom not in regions:
             return False
-        regions = te_regions[chrom]
-        q_start, q_end = center - window, center + window
-        idx = bisect.bisect_left(regions, (q_start,))
-        for r_start, r_end in regions[max(0, idx - 1): idx + 2]:
-            if r_start < q_end and r_end > q_start:
-                # candidate window [center-w, center+w] overlaps TE window [c-w, c+w]
-                # iff |candidate - te_center| < 2*window
+        idx = bisect.bisect_left(regions[chrom], (center,))
+        for r_start, r_end in regions[chrom][max(0, idx - 1): idx + 2]:
+            if r_start <= center <= r_end:
                 return True
         return False
 
-    candidates = [
+    A4_candidates = [
         (chrom, (s + e) // 2)
         for chrom, (starts, ends, _) in A4_k9.items()
         for s, e in zip(starts, ends)
+        if not overlaps(chrom, (s + e) // 2, A4_regions)
+    ]
+    A7_candidates = [
+        (chrom, (s + e) // 2)
+        for chrom, (starts, ends, _) in A7_k9.items()
+        for s, e in zip(starts, ends)
+        if not overlaps(chrom, (s + e) // 2, A7_regions)
     ]
 
+    A4_order = rng.permutation(len(A4_candidates))
+    A7_order = rng.permutation(len(A7_candidates))
+
     rows = []
-    for idx in rng.permutation(len(candidates)):
-        if len(rows) >= n_neg:
+    a7_i = 0
+    for a4_i in A4_order:
+        if len(rows) >= n_neg or a7_i >= len(A7_candidates):
             break
-        chrom, center = candidates[idx]
-        if overlaps_te(chrom, center):
+
+        A4_chrom, A4_center = A4_candidates[int(a4_i)]
+        A7_chrom, A7_center = A7_candidates[int(A7_order[a7_i])]
+        a7_i += 1
+
+        half_te  = int(rng.choice(te_sizes)) // 2
+        te_start = A4_center - half_te
+        te_end   = A4_center + half_te
+
+        A4_left  = extract_K9_window(A4_k9, A4_chrom, te_start  - half_flank, half_flank, bins_per_side)
+        A4_right = extract_K9_window(A4_k9, A4_chrom, te_end    + half_flank, half_flank, bins_per_side)
+        A7_left  = extract_K9_window(A7_k9, A7_chrom, A7_center - half_flank, half_flank, bins_per_side)
+        A7_right = extract_K9_window(A7_k9, A7_chrom, A7_center + half_flank, half_flank, bins_per_side)
+
+        if any(sig is None for sig in [A4_left, A4_right, A7_left, A7_right]):
             continue
-        A4_sig = extract_K9_window(A4_k9, chrom, center, window, n_bins)
-        A7_sig = extract_K9_window(A7_k9, chrom, center, window, n_bins)
-        if A4_sig is None or A7_sig is None:
-            continue
+
         rows.append({
-            "chrom":       chrom,
-            "locus_start": center - window,
-            "locus_end":   center + window,
-            "center":      center,
-            "A4_K9":       A4_sig,
-            "A7_K9":       A7_sig,
+            "chrom":       A4_chrom,
+            "locus_start": te_start,
+            "locus_end":   te_end,
+            "center":      A4_center,
+            "A4_K9":       np.concatenate([A4_left,  A4_right]),
+            "A7_K9":       np.concatenate([A7_left,  A7_right]),
             "label_A4":    0,
             "label_A7":    0,
         })
